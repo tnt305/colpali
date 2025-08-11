@@ -15,8 +15,10 @@ from .phi3_packed_training_patch import replace_phi3_attention_class
 from .qwen2_packed_training_patch import replace_qwen2_attention_class
 from .train_dataloader_patch import replace_train_dataloader
 from .train_sampler_patch import replace_train_sampler
+from .internvl2_gradient_checkpointing import patch_internvl2_gradient_checkpointing
 
 __all__ = ['replace_llama_attn_with_flash_attn',
+           'patch_internvl2_gradient_checkpointing',
            'replace_llama_rmsnorm_with_fused_rmsnorm',
            'replace_llama2_attn_with_flash_attn',
            'replace_train_sampler',
