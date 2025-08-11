@@ -78,7 +78,10 @@ class VisualRetrieverCollator:
         )
 
         # Process queries.
-        queries = [self.processor.query_prefix + q + self.processor.query_augmentation_token * 10 for q in queries]
+        try:
+            queries = [self.processor.query_prefix + q + self.processor.query_augmentation_token * 10 for q in queries]
+        except:
+            queries = [q for q in queries]
         batch_query = self.auto_collate(queries, key_prefix=self.query_prefix)
 
         # Process targets.
