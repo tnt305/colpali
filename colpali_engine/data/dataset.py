@@ -82,7 +82,7 @@ class ColPaliEngineDataset(Dataset):
         
         return {
             'query': sample[self.query_column],
-            # 'image': sample[self.image_column],  # QUAN TRỌNG: Thêm image
+            'image': sample[self.image_column],  # QUAN TRỌNG: Thêm image
             'pos_target': sample[self.pos_target_column] if isinstance(sample[self.pos_target_column], list) else [sample[self.pos_target_column]],
             'neg_target': sample[self.neg_target_column] if isinstance(sample[self.neg_target_column], list) else [sample[self.neg_target_column]],
         }
