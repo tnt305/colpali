@@ -234,9 +234,52 @@ class ColbertNegativeCELoss(ColbertModule):
         Returns:
             Tensor: Scalar loss.
         """
-        lengths = (query_embeddings[:, :, 0] != 0).sum(dim=1)
+        """
+        query_embeddings: (batch_size, num_query_tokens, dim)
+        doc_embeddings: (batch_size, num_doc_tokens, dim)
+        neg_doc_embeddings: (batch_size*num_neg, num_doc_tokens, dim) or (batch_size, num_neg*num_doc_tokens, dim)
+        """
+        # Normalize embeddings if required
+        if self.normalize_scores:
+            query_embeddings = F.normalize(query_embeddings, p=2, dim=-1)
+            doc_embeddings = F.normalize(doc_embeddings, p=2, dim=-1)
+            if neg_doc_embeddings is not None:
+                neg_doc_embeddings = F.normalize(neg_doc_embeddings, p=2, dim=-1)
+
+        # Calculate scores for positive documents
         pos_raw = torch.einsum("bnd,bsd->bns", query_embeddings, doc_embeddings)
-        neg_raw = torch.einsum("bnd,bsd->bns", query_embeddings, neg_doc_embeddings)
+        
+        # Handle negative documents if provided
+        if neg_doc_embeddings is not None:
+            batch_size = query_embeddings.shape[0]
+            neg_batch_size = neg_doc_embeddings.shape[0]
+            
+            # Check if we need to reshape negative embeddings
+            if neg_batch_size != batch_size:
+                # Assume negatives are flattened: [batch_size * num_neg, seq_len, dim]
+                # Calculate how many negatives per query
+                num_neg = neg_batch_size // batch_size
+                
+                # Reshape to get correct batch dimension for einsum
+                # From: [batch_size * num_neg, seq_len, dim] 
+                # To: [batch_size, num_neg * seq_len, dim]
+                seq_len = neg_doc_embeddings.shape[1]
+                dim = neg_doc_embeddings.shape[2]
+                
+                # Option 1: Compute separately for each negative and concatenate
+                neg_raw = []
+                for i in range(batch_size):
+                    # Get all negatives for the current query
+                    query_neg_docs = neg_doc_embeddings[i*num_neg:(i+1)*num_neg]  # Shape: [num_neg, seq_len, dim]
+                    # Compute similarity scores for this query
+                    q_emb = query_embeddings[i:i+1]  # Shape: [1, query_len, dim]
+                    neg_scores = torch.einsum("bnd,nsd->bns", q_emb, query_neg_docs)  # Shape: [1, query_len, num_neg*seq_len]
+                    neg_raw.append(neg_scores)
+                
+                neg_raw = torch.cat(neg_raw, dim=0)  # Shape: [batch_size, query_len, num_neg*seq_len]
+            else:
+                # Standard case where batch sizes match
+                neg_raw = torch.einsum("bnd,bsd->bns", query_embeddings, neg_doc_embeddings)
         pos_scores = self._aggregate(pos_raw, self.use_smooth_max, dim_max=2, dim_sum=1)
         neg_scores = self._aggregate(neg_raw, self.use_smooth_max, dim_max=2, dim_sum=1)
 
