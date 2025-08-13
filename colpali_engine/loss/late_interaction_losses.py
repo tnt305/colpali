@@ -224,20 +224,15 @@ class ColbertNegativeCELoss(ColbertModule):
     ) -> torch.Tensor:
         """
         Compute InfoNCE loss with explicit negatives and optional in-batch term.
-
+        
         Args:
             query_embeddings (Tensor): [B, Nq, D]
             doc_embeddings (Tensor): [B, Nd, D] positive docs
-            neg_doc_embeddings (Tensor): [B, Nneg, D] negative docs
+            neg_doc_embeddings (Tensor): [B*K, Nneg, D] or [B, K*Nneg, D] negative docs
             offset (int): Positional offset for in-batch CE.
-
+        
         Returns:
             Tensor: Scalar loss.
-        """
-        """
-        query_embeddings: (batch_size, num_query_tokens, dim)
-        doc_embeddings: (batch_size, num_doc_tokens, dim)
-        neg_doc_embeddings: (batch_size*num_neg, num_doc_tokens, dim) or (batch_size, num_neg*num_doc_tokens, dim)
         """
         # Normalize embeddings if required
         if self.normalize_scores:
@@ -245,55 +240,65 @@ class ColbertNegativeCELoss(ColbertModule):
             doc_embeddings = F.normalize(doc_embeddings, p=2, dim=-1)
             if neg_doc_embeddings is not None:
                 neg_doc_embeddings = F.normalize(neg_doc_embeddings, p=2, dim=-1)
-
+        
         # Calculate scores for positive documents
         pos_raw = torch.einsum("bnd,bsd->bns", query_embeddings, doc_embeddings)
+        pos_scores = self._aggregate(pos_raw, self.use_smooth_max, dim_max=2, dim_sum=1)
         
-        # Handle negative documents if provided
+        # Handle negative documents
         if neg_doc_embeddings is not None:
             batch_size = query_embeddings.shape[0]
             neg_batch_size = neg_doc_embeddings.shape[0]
             
-            # Check if we need to reshape negative embeddings
+            # PHƯƠNG PHÁP 1: Sử dụng for loop nếu batch size không khớp
             if neg_batch_size != batch_size:
-                # Assume negatives are flattened: [batch_size * num_neg, seq_len, dim]
-                # Calculate how many negatives per query
+                # Giả sử chúng ta có B*K negative samples
                 num_neg = neg_batch_size // batch_size
                 
-                # Reshape to get correct batch dimension for einsum
-                # From: [batch_size * num_neg, seq_len, dim] 
-                # To: [batch_size, num_neg * seq_len, dim]
-                seq_len = neg_doc_embeddings.shape[1]
-                dim = neg_doc_embeddings.shape[2]
+                # Tạo một tensor trống để lưu các scores
+                neg_scores_list = []
                 
-                # Option 1: Compute separately for each negative and concatenate
-                neg_raw = []
+                # Xử lý từng query riêng biệt
                 for i in range(batch_size):
-                    # Get all negatives for the current query
-                    query_neg_docs = neg_doc_embeddings[i*num_neg:(i+1)*num_neg]  # Shape: [num_neg, seq_len, dim]
-                    # Compute similarity scores for this query
-                    q_emb = query_embeddings[i:i+1]  # Shape: [1, query_len, dim]
-                    neg_scores = torch.einsum("bnd,nsd->bns", q_emb, query_neg_docs)  # Shape: [1, query_len, num_neg*seq_len]
-                    neg_raw.append(neg_scores)
+                    q = query_embeddings[i:i+1]  # Lấy query thứ i: [1, Nq, D]
+                    
+                    # Lấy tất cả negative docs cho query này
+                    negs_for_q = neg_doc_embeddings[i*num_neg:(i+1)*num_neg]  # [K, Nneg, D]
+                    
+                    # Flatten negs để dễ tính toán
+                    negs_flat = negs_for_q.reshape(1, -1, negs_for_q.shape[-1])  # [1, K*Nneg, D]
+                    
+                    # Tính similarity
+                    q_neg_raw = torch.einsum("bnd,bsd->bns", q, negs_flat)
+                    q_neg_score = self._aggregate(q_neg_raw, self.use_smooth_max, dim_max=2, dim_sum=1)
+                    neg_scores_list.append(q_neg_score)
                 
-                neg_raw = torch.cat(neg_raw, dim=0)  # Shape: [batch_size, query_len, num_neg*seq_len]
+                # Kết hợp lại
+                neg_scores = torch.cat(neg_scores_list, dim=0)
+                
+            # PHƯƠNG PHÁP 2: Xử lý đơn giản nếu batch size khớp nhau
             else:
-                # Standard case where batch sizes match
                 neg_raw = torch.einsum("bnd,bsd->bns", query_embeddings, neg_doc_embeddings)
-        pos_scores = self._aggregate(pos_raw, self.use_smooth_max, dim_max=2, dim_sum=1)
-        neg_scores = self._aggregate(neg_raw, self.use_smooth_max, dim_max=2, dim_sum=1)
-
-        if self.normalize_scores:
-            pos_scores = self._apply_normalization(pos_scores, lengths)
-            neg_scores = self._apply_normalization(neg_scores, lengths)
-
-        loss = F.softplus((neg_scores - pos_scores) / self.temperature).mean()
-
-        if self.in_batch_term_weight > 0:
-            loss_ib = self.inner_loss(query_embeddings, doc_embeddings, offset)
-            loss = loss * (1 - self.in_batch_term_weight) + loss_ib * self.in_batch_term_weight
-
-        return loss
+                neg_scores = self._aggregate(neg_raw, self.use_smooth_max, dim_max=2, dim_sum=1)
+        
+            # Normalize nếu cần
+            if self.normalize_scores:
+                lengths = query_embeddings.shape[1] * torch.ones(batch_size, device=query_embeddings.device)
+                pos_scores = self._apply_normalization(pos_scores, lengths)
+                neg_scores = self._apply_normalization(neg_scores, lengths)
+            
+            # Tính loss
+            loss = F.softplus((neg_scores - pos_scores) / self.temperature).mean()
+            
+            # Thêm in-batch term nếu cần
+            if self.in_batch_term_weight > 0:
+                loss_ib = self.inner_loss(query_embeddings, doc_embeddings, offset)
+                loss = loss * (1 - self.in_batch_term_weight) + loss_ib * self.in_batch_term_weight
+            
+            return loss
+        
+        # Nếu không có negative samples, sử dụng chỉ in-batch negatives
+        return self.inner_loss(query_embeddings, doc_embeddings, offset)
 
 
 class ColbertPairwiseCELoss(ColbertModule):
