@@ -193,29 +193,49 @@ class ContrastiveTrainer(Trainer):
         )
 
     def compute_loss(self, model, inputs, return_outputs=False):
-        # (Phần này đã được sửa từ trước và giữ nguyên)
+        """
+        Tính toán loss, xử lý đúng các explicit negatives.
+        """
+        # 1. Forward pass để lấy các đối tượng output từ model.
+        # Model đa phương thức cần các input đầy đủ.
         query_inputs = {k: v for k, v in inputs.items() if k.startswith("query_")}
         doc_inputs = {k[4:]: v for k, v in inputs.items() if k.startswith("doc_")}
         
+        # Giả định model có phương thức riêng để encode query và document
         query_outputs = model(**query_inputs)
         doc_outputs = model.encode_document(doc_inputs)
-
+    
+        # 2. Trích xuất TENSOR embedding từ các đối tượng output.
+        # Tên thuộc tính có thể là 'last_hidden_state' hoặc 'text_embeds' tùy vào model.
+        # Hãy kiểm tra đối tượng output của model để chắc chắn.
         query_embeddings = query_outputs.last_hidden_state
         doc_embeddings = doc_outputs.last_hidden_state
-
+    
+        # 3. KIỂM TRA và xử lý negative documents nếu chúng tồn tại trong batch.
+        # Đây là bước quan trọng nhất mà phiên bản cũ của bạn đang thiếu.
         if "neg_doc_input_ids" in inputs:
             neg_doc_inputs = {k[8:]: v for k, v in inputs.items() if k.startswith("neg_doc_")}
             neg_doc_outputs = model.encode_document(neg_doc_inputs)
             neg_doc_embeddings = neg_doc_outputs.last_hidden_state
             
-            loss = self.loss_func(query_embeddings, doc_embeddings, neg_doc_embeddings)
+            # 4. Gọi hàm loss với ĐẦY ĐỦ 3 BỘ EMBEDDINGS.
+            loss = self.loss_func(
+                query_embeddings=query_embeddings, 
+                doc_embeddings=doc_embeddings, 
+                neg_doc_embeddings=neg_doc_embeddings
+            )
+            
             outputs = (query_outputs, doc_outputs, neg_doc_outputs)
             return (loss, outputs) if return_outputs else loss
-        
-        # Trường hợp chỉ có positive và in-batch negative
-        loss = self.loss_func(query_embeddings, doc_embeddings)
-        outputs = (query_outputs, doc_outputs)
-        return (loss, outputs) if return_outputs else loss
+        else:
+            # Xử lý trường hợp không có explicit negatives (chỉ dùng in-batch)
+            # Hàm loss của bạn có thể không hỗ trợ trường hợp này, nhưng để code an toàn hơn
+            loss = self.loss_func(
+                query_embeddings=query_embeddings,
+                doc_embeddings=doc_embeddings
+            )
+            outputs = (query_outputs, doc_outputs)
+            return (loss, outputs) if return_outputs else loss
 
     def prediction_step(self, model, inputs, prediction_loss_only, ignore_keys=True):
         """This function is used to generate predictions and return the loss for the given inputs."""
