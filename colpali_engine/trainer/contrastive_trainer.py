@@ -203,38 +203,33 @@ class ContrastiveTrainer(Trainer):
         query_embeddings = query_outputs.last_hidden_state
         doc_embeddings = pos_doc_outputs.last_hidden_state
 
-        # 2. KIỂM TRA và xử lý Negative Docs (PHẦN SỬA LỖI)
+        # 2. KIỂM TRA và xử lý Negative Docs (PHẦN SỬA LỖI QUAN TRỌNG)
         if "neg_doc_input_ids" in inputs:
-            # Lấy tensor 3D từ collator
             neg_input_ids = inputs['neg_doc_input_ids']           # Shape: [B, K, L]
             neg_attention_mask = inputs['neg_doc_attention_mask'] # Shape: [B, K, L]
             
-            # Lấy các chiều
             batch_size, num_neg, seq_len = neg_input_ids.shape
-            embedding_dim = query_embeddings.shape[-1]
             
             # --- RESHAPE TRƯỚC KHI VÀO MODEL ---
-            # Biến 3D -> 2D: [B, K, L] -> [B * K, L]
+            # Biến 3D -> 2D để model có thể xử lý: [B, K, L] -> [B * K, L]
             reshaped_neg_input_ids = neg_input_ids.view(batch_size * num_neg, seq_len)
             reshaped_neg_attention_mask = neg_attention_mask.view(batch_size * num_neg, seq_len)
             
-            # Tạo input 2D cho model
             neg_doc_inputs_for_model = {
                 'input_ids': reshaped_neg_input_ids,
                 'attention_mask': reshaped_neg_attention_mask
             }
             
-            # Gọi model với input 2D
+            # Gọi model với input 2D đã được làm phẳng
             neg_doc_outputs = model.encode_document(neg_doc_inputs_for_model)
-            # Embedding đầu ra có shape: [B * K, L, D]
-            flat_neg_embeddings = neg_doc_outputs.last_hidden_state
+            flat_neg_embeddings = neg_doc_outputs.last_hidden_state # Shape: [B * K, L, D]
             
             # --- RESHAPE SAU KHI RA KHỎI MODEL ---
-            # Biến 2D -> 3D để phù hợp với hàm loss:
+            # Biến đổi embedding để phù hợp với hàm loss
             # [B * K, L, D] -> [B, K * L, D]
+            embedding_dim = flat_neg_embeddings.shape[-1]
             neg_doc_embeddings = flat_neg_embeddings.view(batch_size, num_neg * seq_len, embedding_dim)
             
-            # Gọi hàm loss với các embedding đã được định dạng đúng
             loss = self.loss_func(
                 query_embeddings=query_embeddings, 
                 doc_embeddings=doc_embeddings, 
@@ -245,7 +240,7 @@ class ContrastiveTrainer(Trainer):
             return (loss, outputs_tuple) if return_outputs else loss
         
         else:
-            # Trường hợp không có explicit negatives (phòng bị)
+            # Trường hợp không có explicit negatives
             return super().compute_loss(model, inputs, return_outputs)
 
     def prediction_step(self, model, inputs, prediction_loss_only, ignore_keys=True):
