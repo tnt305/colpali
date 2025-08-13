@@ -193,50 +193,60 @@ class ContrastiveTrainer(Trainer):
         )
 
     def compute_loss(self, model, inputs, return_outputs=False):
-        """
-        Phiên bản compute_loss an toàn và có debug.
-        """
-        # --- BƯỚC DEBUG: In ra các key có trong batch ---
-        # Điều này sẽ cho chúng ta biết liệu 'neg_doc_input_ids' có được truyền vào hay không.
-        print("Các key trong batch hiện tại:", list(inputs.keys()))
-    
-        # 1. Forward pass và trích xuất embeddings
-        try:
-            query_inputs = {k: v for k, v in inputs.items() if k.startswith("query_")}
-            doc_inputs = {k[4:]: v for k, v in inputs.items() if k.startswith("doc_")}
-            
-            query_outputs = model(**query_inputs)
-            doc_outputs = model.encode_document(doc_inputs)
-    
-            query_embeddings = query_outputs.last_hidden_state
-            doc_embeddings = doc_outputs.last_hidden_state
-        except Exception as e:
-            raise RuntimeError(f"Lỗi xảy ra trong quá trình forward pass hoặc trích xuất embedding: {e}")
-    
-        # 2. KIỂM TRA sự tồn tại của negative embeddings
+        # 1. Xử lý Query và Positive Docs (giữ nguyên)
+        query_inputs = {k: v for k, v in inputs.items() if k.startswith("query_")}
+        doc_inputs = {k[4:]: v for k, v in inputs.items() if k.startswith("doc_")}
+        
+        query_outputs = model(**query_inputs)
+        pos_doc_outputs = model.encode_document(doc_inputs)
+
+        query_embeddings = query_outputs.last_hidden_state
+        doc_embeddings = pos_doc_outputs.last_hidden_state
+
+        # 2. KIỂM TRA và xử lý Negative Docs (PHẦN SỬA LỖI)
         if "neg_doc_input_ids" in inputs:
-            # Nếu có, xử lý và gọi hàm loss với 3 tham số
-            print("Đã tìm thấy 'neg_doc_input_ids', đang tính loss với explicit negatives.")
-            neg_doc_inputs = {k[8:]: v for k, v in inputs.items() if k.startswith("neg_doc_")}
-            neg_doc_outputs = model.encode_document(neg_doc_inputs)
-            neg_doc_embeddings = neg_doc_outputs.last_hidden_state
+            # Lấy tensor 3D từ collator
+            neg_input_ids = inputs['neg_doc_input_ids']           # Shape: [B, K, L]
+            neg_attention_mask = inputs['neg_doc_attention_mask'] # Shape: [B, K, L]
             
+            # Lấy các chiều
+            batch_size, num_neg, seq_len = neg_input_ids.shape
+            embedding_dim = query_embeddings.shape[-1]
+            
+            # --- RESHAPE TRƯỚC KHI VÀO MODEL ---
+            # Biến 3D -> 2D: [B, K, L] -> [B * K, L]
+            reshaped_neg_input_ids = neg_input_ids.view(batch_size * num_neg, seq_len)
+            reshaped_neg_attention_mask = neg_attention_mask.view(batch_size * num_neg, seq_len)
+            
+            # Tạo input 2D cho model
+            neg_doc_inputs_for_model = {
+                'input_ids': reshaped_neg_input_ids,
+                'attention_mask': reshaped_neg_attention_mask
+            }
+            
+            # Gọi model với input 2D
+            neg_doc_outputs = model.encode_document(neg_doc_inputs_for_model)
+            # Embedding đầu ra có shape: [B * K, L, D]
+            flat_neg_embeddings = neg_doc_outputs.last_hidden_state
+            
+            # --- RESHAPE SAU KHI RA KHỎI MODEL ---
+            # Biến 2D -> 3D để phù hợp với hàm loss:
+            # [B * K, L, D] -> [B, K * L, D]
+            neg_doc_embeddings = flat_neg_embeddings.view(batch_size, num_neg * seq_len, embedding_dim)
+            
+            # Gọi hàm loss với các embedding đã được định dạng đúng
             loss = self.loss_func(
                 query_embeddings=query_embeddings, 
                 doc_embeddings=doc_embeddings, 
                 neg_doc_embeddings=neg_doc_embeddings
             )
             
-            outputs = (query_outputs, doc_outputs, neg_doc_outputs)
-            return (loss, outputs) if return_outputs else loss
+            outputs_tuple = (query_outputs, pos_doc_outputs, neg_doc_outputs)
+            return (loss, outputs_tuple) if return_outputs else loss
+        
         else:
-            # Nếu KHÔNG CÓ, dừng lại và báo lỗi rõ ràng thay vì gây TypeError
-            # Vì hàm loss của bạn BẮT BUỘC phải có neg_doc_embeddings
-            raise ValueError(
-                "LỖI NGHIÊM TRỌNG: Hàm ColbertNegativeCELoss yêu cầu explicit negatives, "
-                "nhưng không tìm thấy 'neg_doc_input_ids' trong batch dữ liệu. "
-                "Vui lòng kiểm tra lại DataCollator hoặc Dataset của bạn."
-            )
+            # Trường hợp không có explicit negatives (phòng bị)
+            return super().compute_loss(model, inputs, return_outputs)
 
     def prediction_step(self, model, inputs, prediction_loss_only, ignore_keys=True):
         """This function is used to generate predictions and return the loss for the given inputs."""
