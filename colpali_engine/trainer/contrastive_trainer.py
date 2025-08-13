@@ -194,31 +194,33 @@ class ContrastiveTrainer(Trainer):
 
     def compute_loss(self, model, inputs, return_outputs=False):
         """
-        Tính toán loss, xử lý đúng các explicit negatives.
+        Phiên bản compute_loss an toàn và có debug.
         """
-        # 1. Forward pass để lấy các đối tượng output từ model.
-        # Model đa phương thức cần các input đầy đủ.
-        query_inputs = {k: v for k, v in inputs.items() if k.startswith("query_")}
-        doc_inputs = {k[4:]: v for k, v in inputs.items() if k.startswith("doc_")}
-        
-        # Giả định model có phương thức riêng để encode query và document
-        query_outputs = model(**query_inputs)
-        doc_outputs = model.encode_document(doc_inputs)
+        # --- BƯỚC DEBUG: In ra các key có trong batch ---
+        # Điều này sẽ cho chúng ta biết liệu 'neg_doc_input_ids' có được truyền vào hay không.
+        print("Các key trong batch hiện tại:", list(inputs.keys()))
     
-        # 2. Trích xuất TENSOR embedding từ các đối tượng output.
-        # Tên thuộc tính có thể là 'last_hidden_state' hoặc 'text_embeds' tùy vào model.
-        # Hãy kiểm tra đối tượng output của model để chắc chắn.
-        query_embeddings = query_outputs.last_hidden_state
-        doc_embeddings = doc_outputs.last_hidden_state
+        # 1. Forward pass và trích xuất embeddings
+        try:
+            query_inputs = {k: v for k, v in inputs.items() if k.startswith("query_")}
+            doc_inputs = {k[4:]: v for k, v in inputs.items() if k.startswith("doc_")}
+            
+            query_outputs = model(**query_inputs)
+            doc_outputs = model.encode_document(doc_inputs)
     
-        # 3. KIỂM TRA và xử lý negative documents nếu chúng tồn tại trong batch.
-        # Đây là bước quan trọng nhất mà phiên bản cũ của bạn đang thiếu.
+            query_embeddings = query_outputs.last_hidden_state
+            doc_embeddings = doc_outputs.last_hidden_state
+        except Exception as e:
+            raise RuntimeError(f"Lỗi xảy ra trong quá trình forward pass hoặc trích xuất embedding: {e}")
+    
+        # 2. KIỂM TRA sự tồn tại của negative embeddings
         if "neg_doc_input_ids" in inputs:
+            # Nếu có, xử lý và gọi hàm loss với 3 tham số
+            print("Đã tìm thấy 'neg_doc_input_ids', đang tính loss với explicit negatives.")
             neg_doc_inputs = {k[8:]: v for k, v in inputs.items() if k.startswith("neg_doc_")}
             neg_doc_outputs = model.encode_document(neg_doc_inputs)
             neg_doc_embeddings = neg_doc_outputs.last_hidden_state
             
-            # 4. Gọi hàm loss với ĐẦY ĐỦ 3 BỘ EMBEDDINGS.
             loss = self.loss_func(
                 query_embeddings=query_embeddings, 
                 doc_embeddings=doc_embeddings, 
@@ -228,14 +230,13 @@ class ContrastiveTrainer(Trainer):
             outputs = (query_outputs, doc_outputs, neg_doc_outputs)
             return (loss, outputs) if return_outputs else loss
         else:
-            # Xử lý trường hợp không có explicit negatives (chỉ dùng in-batch)
-            # Hàm loss của bạn có thể không hỗ trợ trường hợp này, nhưng để code an toàn hơn
-            loss = self.loss_func(
-                query_embeddings=query_embeddings,
-                doc_embeddings=doc_embeddings
+            # Nếu KHÔNG CÓ, dừng lại và báo lỗi rõ ràng thay vì gây TypeError
+            # Vì hàm loss của bạn BẮT BUỘC phải có neg_doc_embeddings
+            raise ValueError(
+                "LỖI NGHIÊM TRỌNG: Hàm ColbertNegativeCELoss yêu cầu explicit negatives, "
+                "nhưng không tìm thấy 'neg_doc_input_ids' trong batch dữ liệu. "
+                "Vui lòng kiểm tra lại DataCollator hoặc Dataset của bạn."
             )
-            outputs = (query_outputs, doc_outputs)
-            return (loss, outputs) if return_outputs else loss
 
     def prediction_step(self, model, inputs, prediction_loss_only, ignore_keys=True):
         """This function is used to generate predictions and return the loss for the given inputs."""
